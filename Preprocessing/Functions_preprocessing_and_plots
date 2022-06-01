@@ -1,0 +1,286 @@
+# Databricks notebook source
+# MAGIC %md # Load Packages
+
+# COMMAND ----------
+
+import pandas as pd
+pd.options.mode.chained_assignment = None # Set warnings uit
+import os
+import pyspark.sql.functions as F
+from pyspark.sql.functions import *
+from pyspark.sql.functions import col
+from sklearn.preprocessing import OneHotEncoder
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import numpy as np
+import operator
+from sklearn.utils import resample
+
+from tqdm import tqdm
+from tqdm.notebook import tqdm
+from tqdm.keras import TqdmCallback
+
+%matplotlib inline 
+
+# COMMAND ----------
+
+# MAGIC %md # Load NASA Table
+
+# COMMAND ----------
+
+spark.sql("use standaardtabellen")
+NASA = spark.sql("select * from nasastandaardtabel")
+NASA = NASA.select(col("NASA_NR"), col("PRIMARY_EAN").alias("ARTIKEL_EAN"), col("GLN").alias("gln_nasa"), col("SCHAPSTICKER_OMSCHRIJVING"),col("ASSGROEP_OMSCHRIJVING"))
+
+GLNAH = spark.read.format('delta').load('/mnt/Prd_adls/Conformed/TIMS/TradeItem/ahTradeItem/Data/').filter('__DeletedFlag == 0')
+GLNAH = GLNAH.select(col("gtin").alias("gtin1"), col("gln").alias('gln1'), col("glnAH"))
+
+NASA = NASA.join(GLNAH, (NASA.ARTIKEL_EAN == GLNAH.gtin1) & (NASA.gln_nasa == GLNAH.gln1), how = "left")
+NASA = NASA.filter(NASA.glnAH == True)
+
+NASA = NASA.select("ARTIKEL_EAN", "gln_nasa","glnAH")
+NASA = NASA.withColumnRenamed("ARTIKEL_EAN", "gtin") # hernoem naar gtin, zodat we department kunnen mergen.
+#display(NASA)
+
+# COMMAND ----------
+
+# MAGIC %md #Functions
+
+# COMMAND ----------
+
+# MAGIC %md ## Prepare data
+
+# COMMAND ----------
+
+def get_unique_classes(df, attribuut="ndTypeOfGrain"):
+    unique_classes = []
+    for item in df[attribuut]:
+        unique_classes.append(item)
+        if item == '':
+            unique_classes.append("EMPTY")
+    unique_classes = list(set(unique_classes))
+
+    # Split op -> |
+    items = []
+    for item in unique_classes:
+        try:
+            _item = item.split("|")
+            items.append(_item)
+        except:
+            pass
+    items_flat = [item for sublist in items for item in sublist]
+    unique_items = sorted(list(set(items_flat))) # met set unique classes eruit halen, daarna weer terug naar een list
+    #unique_items.remove("") # Haal de empty toegewezen class eruit
+    #print(unique_items, "\n\nunique classes: ", len(unique_items))
+    return unique_items
+
+def one_hot_encoder(df_unique, unique_items, attribuut="ndTypeOfGrain"):
+    #one-hot encoder,
+    for index,item in enumerate(unique_items):
+        df_unique[str(unique_items[index])] = df_unique[attribuut].str.contains(pat = str(unique_items[index]))
+        df_unique[str(unique_items[index])] = df_unique[str(unique_items[index])]*1    # Convert boolean naar integer voor een NN model later.  
+    return df_unique
+
+def create_overig(df_unique,ATTRIBUUT,unique_items, Overig_threshold):
+    all_classes = unique_items
+    df_unique_classes_only = df_unique[all_classes]
+    lijst_kleine_classes = []
+    grote_classes = []
+    for column in all_classes:
+        #print(column,(df_unique[column] == 1).sum())
+        if (df_unique[column] == 1).sum() <= Overig_threshold:
+            lijst_kleine_classes.append(column)
+        else:
+            grote_classes.append(column)
+    print("Kleine classes die onder overige moeten: ",lijst_kleine_classes)
+    
+    for index, class_ in enumerate(lijst_kleine_classes):
+        if index==0:
+            df_unique['overig'] = np.where(df_unique[class_] == 1, 1, 0)
+        else:
+            df_unique['overig'] = np.where(df_unique[class_] == 1, 1, df_unique['overig'])
+    print("Grotere classes: ", grote_classes)
+    grote_classes.append('overig')
+    encoder = OneHotEncoder(handle_unknown='ignore')
+    
+    for index,item in enumerate(grote_classes):
+        df_encoded = pd.DataFrame(encoder.fit_transform(df_unique[[str(grote_classes[index])]]).toarray().astype(int))
+        df_unique[str(grote_classes[index])] = df_encoded.values.tolist()     
+    df_unique = df_unique.drop(columns=lijst_kleine_classes, axis=1)
+    return df_unique, grote_classes
+  
+def classes_to_array(df_unique, attribuut="ndTypeOfGrain"):
+    True_class = []
+    class_soort = []
+    df_classes_only = df_unique.drop(df_unique.columns[[0,1,2,3]], axis=1) # Drop eerste 4 columns van hierboven
+
+    for class_item in df_classes_only:
+        True_class.append(df_classes_only[class_item].sum())
+        class_soort.append(class_item)
+
+    classes_available = dict(zip(class_soort, True_class))
+    classes_available = dict( sorted(classes_available.items(), key=operator.itemgetter(1),reverse=True))
+
+    df_unique['Aantal_classes'] = df_unique[class_soort].sum(axis=1)
+    df_only_classes = df_unique[class_soort]
+    df_unique['class_num_'+attribuut] = df_only_classes.values.tolist()
+    df_unique['class_names_'+attribuut] = [class_soort for row in range(len(df_unique))]
+    return df_unique, classes_available
+
+def without_all_classes(df_unique, attribuut="ndTypeOfGrain"): 
+    df_without_all_classes = df_unique[['gtin','gln','glnAH',str(attribuut),'Aantal_classes', 'class_num_'+str(attribuut),'class_names_'+str(attribuut)]].copy()
+    return df_without_all_classes
+    
+def save_table(df_small, ATTRIBUUT):
+    # Save Table
+    spark_df = spark.createDataFrame(df_small)
+    file_name = '_'+ATTRIBUUT+'_ML_inc_overig'
+    spark.sql("use mltrainingdata")
+    x = 'drop table if exists ' + file_name
+    spark.sql(x)
+    spark_df.write.mode("overwrite").saveAsTable(file_name)
+
+# COMMAND ----------
+
+# MAGIC %md ## Plot Functions
+
+# COMMAND ----------
+
+def plot_class_distributie(df_unique, attribuut="ndTypeOfGrain"):
+    MAX_LENGTH = df_unique['Aantal_classes'].max()
+    sns.histplot(df_unique['Aantal_classes'], bins=MAX_LENGTH, kde=True, element="step", color='navy')
+    plt.xlabel("Amount classes in product, dataset "+attribuut)
+    plt.xlim(1,MAX_LENGTH+1)
+    combinations_count = list(df_unique['Aantal_classes'].value_counts())
+    plt.ylim(0, int(combinations_count[0])+100) # customize the size of the figure by the max value of bin 1
+    print(df_unique['Aantal_classes'].value_counts())
+
+def distribution_of_unique_classes_2(classes_available, attribuut="ndTypeOfGrain"):
+    print(classes_available)
+    plt.bar(range(len(classes_available)), list(classes_available.values()), tick_label = list(classes_available.keys()))
+    plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md ## Create 'Others/Overige'
+
+# COMMAND ----------
+
+
+def create_overige_class(nd_controle, ATTRIBUUT,Classes_threshold, Overig_threshold):
+    multi_label_flag = False
+    from sklearn.preprocessing import OneHotEncoder
+    df = nd_controle.toPandas() # clear dataframe
+    df = df.replace(r'^\s*$', 'EMPTY', regex=True)
+    Class_verdeling = df[ATTRIBUUT].value_counts().reset_index()
+    print("ATTRIBUUT: ", ATTRIBUUT)
+    #print("Verhouding van classes: \n",Class_verdeling)
+    unique_items = get_unique_classes(df,ATTRIBUUT)
+
+    # Split colomn into classes  / Split de column van het attribuut in classes
+    df_unique = df[["gtin","gln","glnAH",ATTRIBUUT]]
+    if len(unique_items) >=Classes_threshold: # check if Attribuut has more than 10 classes
+        df_geformateerd = one_hot_encoder(df_unique, unique_items, ATTRIBUUT)
+        
+#         useless_df, classes_available_plot = classes_to_array(df_geformateerd, ATTRIBUUT)
+#         distribution_of_unique_classes_2(classes_available_plot,ATTRIBUUT)
+        
+        df_geformateerd, grote_classes = create_overig(df_geformateerd, ATTRIBUUT,unique_items, Overig_threshold)
+        df_geformateerd, classes_available = classes_to_array(df_geformateerd, ATTRIBUUT)
+        multi_label_flag = True
+    else:
+        df_geformateerd = one_hot_encoder(df_unique, unique_items, ATTRIBUUT)
+        df_geformateerd, classes_available = classes_to_array(df_geformateerd, ATTRIBUUT)
+        distribution_of_unique_classes_2(classes_available,ATTRIBUUT)
+        multi_label_flag = False
+
+    print("null entries = ", df_geformateerd["class_num_"+str(ATTRIBUUT)].isna().sum())
+    return df_geformateerd,multi_label_flag,classes_available
+
+# COMMAND ----------
+
+# MAGIC %md ## Balance multi-label
+
+# COMMAND ----------
+
+def balance_multi_label_2(DF_ATTRIBUUT, target):
+    indexes_true = []
+    indexes_false = []
+
+    for index, value in enumerate(target):
+        if value == [0,1]:
+            indexes_true.append(index)
+        else:
+            indexes_false.append(index)
+    DF_true_class = DF_ATTRIBUUT.iloc[indexes_true]
+    DF_false_class = DF_ATTRIBUUT.iloc[indexes_false]
+    DF_false_class = DF_false_class.sample(n=len(DF_true_class))
+    balanced_df = pd.concat([DF_true_class, DF_false_class])
+    return balanced_df
+
+# COMMAND ----------
+
+def balance_multi_label(UPSAMPLE_Classes, y_train, X_train, classes, Upsample_size):
+    for class_ in UPSAMPLE_Classes:
+        # UP-sample op xtrain en niet in testset en validatieset, zo komen dezelfde producten niet in alle sets.
+        df_minority_y = y_train.loc[y_train[class_].astype(str)==str(classes[1])]
+        samples_available = len(df_minority_y)
+        print("Samples available = ",samples_available)
+        if samples_available < Upsample_size:
+            X_train_no_duplicates = X_train[~X_train.index.duplicated(keep='first')]
+
+
+            # Upsample minority class
+            y_train_upsample = resample(df_minority_y, 
+                                             replace=True,     # sample with replacement
+                                             n_samples=int(Upsample_size-samples_available),    # to match majority class
+                                             random_state=123) # reproducible results
+
+            X_train_upsample = X_train_no_duplicates.loc[y_train_upsample.index.tolist()]
+            #X_train = X_train.loc[y_train.index.tolist()]
+            y_train = pd.concat([y_train, y_train_upsample])
+            X_train = pd.concat([X_train, X_train_upsample])
+            print(class_)
+            print(len(df_minority_y), len(X_train_no_duplicates))
+            print(len(y_train_upsample),len(X_train_upsample))
+            print(len(y_train), len(X_train))
+                        
+    return X_train, y_train
+
+# COMMAND ----------
+
+def balance_single_label(DF_merged, upsample_classes_list, Upsample_size):
+    for class_ in upsample_classes_list:
+        # UP-sample op xtrain en niet in testset en validatieset, zo komen dezelfde producten niet in alle sets.
+        df_minority = DF_merged.loc[DF_merged[class_] == 1]
+        samples_available = len(df_minority)
+        print("Samples available = ",samples_available)
+        
+        if samples_available < Upsample_size:
+
+            # Upsample minority class
+            upsampled_df = resample(df_minority, 
+                                             replace=True,     # sample with replacement
+                                             n_samples=int(Upsample_size-samples_available),    # to match majority class
+                                             random_state=123) # reproducible results
+            DF_merged = pd.concat([DF_merged, upsampled_df])
+                       
+    return DF_merged
+
+# COMMAND ----------
+
+# Under construction
+def imbalance_check_single_label(classes_available, DF_merged, upsample_single_label):
+    upsample_classes_list = []
+    for key, value in classes_available.items():
+        if value < balance_threshold_single_label:
+            upsample_classes_list.append(key)
+    if len(upsample_classes_list) > 0:
+        print("\nDeze classes zijn laag in sample, en worden gebalanceerd: ", upsample_classes_list)
+        
+        print("Dataframe length, VOOR balancing", len(DF_merged))
+        DF_merged = balance_single_label(DF_merged, upsample_classes_list, upsample_single_label)
+        print("Dataframe length, NA balancing", len(DF_merged),"\n")
+        
+    return DF_merged
