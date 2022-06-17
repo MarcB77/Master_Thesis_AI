@@ -1,3 +1,6 @@
+IMPORTANT: This repository is the original version of how it was build in Azure Databricks. <br />
+A WORKING EXAMPLE CAN BE FOUND HERE: https://github.com/MarcB77/Master_Thesis_AI_example
+
 Author: Marc Blomvliet <br />
 Master Thesis - Artificial Intelligence - Vrije Universiteit Amsterdam
 
