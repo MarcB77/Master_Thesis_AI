@@ -1,5 +1,7 @@
 IMPORTANT: This repository is the original version of how it was build in Azure Databricks. <br />
-A SIMPLE WORKING EXAMPLE CAN BE FOUND HERE, FOR A SINGLE-LABEL ATTRIBUTE (PROVIDED WITH A SMALL DATASET).: https://github.com/MarcB77/Master_Thesis_AI_example
+A SIMPLE WORKING EXAMPLE CAN BE FOUND HERE, FOR A SINGLE-LABEL ATTRIBUTE (PROVIDED WITH A SMALL DATASET).: https://github.com/MarcB77/Master_Thesis_AI_example 
+
+So unfortunately, an example notebook for multi-label classification. Can not be provided, because their is no data available.
 
 Author: Marc Blomvliet <br />
 Master Thesis - Artificial Intelligence - Vrije Universiteit Amsterdam
