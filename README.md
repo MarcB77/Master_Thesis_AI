@@ -10,5 +10,5 @@ Master Thesis - Artificial Intelligence - Vrije Universiteit Amsterdam
 <br />
 _______________________________________________________________________________________________________________________<br />
 I would like to express my sincere gratitude to my internship supervisors M. Christiaanse and B. van der Pol from Albert Heijn for the continuous support throughout this Master's research project. They provided me a very exciting research project. Besides my internship supervisors, I would like to thank the rest of the team at Albert Heijn for their support, guidance and advice throughout my research project. <br />
-My sincere thanks also goes to Prof. Anil Yaman, for his support, guidance and advice as well.
+My sincere thanks also goes to Dr. A. Yaman, for his support, guidance and advice as well.
 His insightful comments, questions and advice helped me during my research project.
